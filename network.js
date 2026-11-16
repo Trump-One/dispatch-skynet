@@ -81,6 +81,122 @@
     };
   }
 
+  function sampleCurve(start, end, bend) {
+    const path = curve(start, end, bend);
+    return Array.from({ length: 17 }, (_, index) => pointOnCurve(path, index / 16));
+  }
+
+  function nodePort(node, toward) {
+    if (!node.width || !node.height) return node;
+    const dx = toward.x - node.x;
+    const dy = toward.y - node.y;
+    if (!dx && !dy) return node;
+    const scale = Math.min(
+      (node.width / 2 + 2) / Math.abs(dx),
+      (node.height / 2 + 2) / Math.abs(dy),
+    );
+    return { x: node.x + dx * scale, y: node.y + dy * scale };
+  }
+
+  function globePoint(center, radius, angle) {
+    return { x: center.x + radius * Math.cos(angle), y: center.y + radius * Math.sin(angle) };
+  }
+
+  function globeAngle(center, point) {
+    return Math.atan2(point.y - center.y, point.x - center.x);
+  }
+
+  function completionLeg(center, node, completed) {
+    const exit = nodePort(node, completed);
+    return sampleCurve(exit, completed, center.r * 0.24);
+  }
+
+  function createTransferPath(layout, transfer) {
+    const { center, nodes, pool, completed, coreRadius = center.r * 0.46 } = layout;
+    const target = nodes[transfer.to];
+    if (!target) return null;
+
+    const sourceNode = nodes[transfer.from];
+    const source = sourceNode || pool || globePoint(center, center.r * 1.21, Math.PI + 0.56);
+    const destinationAngle = globeAngle(center, target);
+    const sourceAngle = globeAngle(center, source) + (sourceNode ? 0 : 0.38);
+    const orbitRadius = Math.max(center.r * 0.81, Math.min(center.r * 0.97, coreRadius + 24));
+    const orbitStart = globePoint(center, orbitRadius, sourceAngle);
+    const orbitEnd = globePoint(center, orbitRadius, destinationAngle);
+    const ingress = sampleCurve(nodePort(source, orbitStart), orbitStart, sourceNode ? 0 : -center.r * 0.29);
+
+    let sweep = Math.atan2(Math.sin(destinationAngle - sourceAngle), Math.cos(destinationAngle - sourceAngle));
+    if (transfer.from === transfer.to) sweep = tau;
+    const orbit = Array.from({ length: 37 }, (_, index) =>
+      globePoint(center, orbitRadius, sourceAngle + sweep * index / 36),
+    );
+    const egress = sampleCurve(orbitEnd, nodePort(target, orbitEnd), center.r * 0.12);
+    const points = [...ingress, ...orbit.slice(1), ...egress.slice(1)];
+
+    if (transfer.completed && completed) {
+      // The intermediate points across the card are beneath its opaque surface.
+      points.push(...completionLeg(center, target, completed));
+    }
+
+    let length = 0;
+    const distances = points.map((point, index) => {
+      if (index) {
+        const previous = points[index - 1];
+        length += Math.hypot(point.x - previous.x, point.y - previous.y);
+      }
+      return length;
+    });
+    return { points, distances, length };
+  }
+
+  function pathPoint(path, distance) {
+    const end = path.distances.findIndex((value) => value >= distance);
+    if (end <= 0) return path.points[end === 0 ? 0 : path.points.length - 1];
+    const start = end - 1;
+    const interval = path.distances[end] - path.distances[start];
+    const offset = interval ? (distance - path.distances[start]) / interval : 0;
+    return {
+      x: mix(path.points[start].x, path.points[end].x, offset),
+      y: mix(path.points[start].y, path.points[end].y, offset),
+    };
+  }
+
+  function drawPolyline(context, points, color, width) {
+    context.lineWidth = width;
+    context.strokeStyle = color;
+    context.beginPath();
+    context.moveTo(points[0].x, points[0].y);
+    for (const point of points.slice(1)) context.lineTo(point.x, point.y);
+    context.stroke();
+  }
+
+  function drawTransfer(context, path, transfer) {
+    const { completed, tone } = transfer;
+    const progress = Math.max(0, Math.min(1, transfer.progress));
+    const distance = progress * path.length;
+    const point = pathPoint(path, distance);
+    const fading = Math.min(1, 0.32 + progress * 7, 0.58 + (1 - progress) * 7);
+    const colors = completed ? '148, 250, 192' : tone === 'ambient' ? '184, 218, 226' : '238, 253, 255';
+    const trailLength = Math.min(133, Math.max(64, path.length * 0.19));
+    const trail = Array.from({ length: 23 }, (_, index) =>
+      pathPoint(path, Math.max(0, distance - trailLength * (1 - index / 22))),
+    );
+
+    drawPolyline(context, path.points, `rgba(${colors}, ${tone === 'ambient' ? 0.18 : 0.30})`, 1.1);
+
+    for (let start = 0; start < 22; start += 1) {
+      const strength = fading * (start + 1) / 22;
+      const segment = [trail[start], trail[start + 1]];
+      drawPolyline(context, segment, `rgba(${colors}, ${strength * 0.18})`, 8.5);
+      drawPolyline(context, segment, `rgba(${colors}, ${strength * 0.98})`, 2.15);
+    }
+
+    drawDot(context, point.x, point.y, 11, `rgba(${colors}, ${fading * 0.13})`);
+    drawDot(context, point.x, point.y, 6.3, `rgba(${colors}, ${fading * 0.35})`);
+    drawDot(context, point.x, point.y, 3.1, `rgba(${colors}, ${fading})`);
+    return { ...point, id: transfer.id, tone, completed };
+  }
+
   function drawCurve(context, path, color, offset = 0) {
     const { start, controlA, controlB, end } = path;
     context.strokeStyle = color;
@@ -210,6 +326,7 @@
       this.elapsed = 0;
       this.previousFrame = null;
       this.lastDraw = null;
+      this.transferPath = null;
       this.size = { width: 0, height: 0 };
       this.observer = new ResizeObserver(([entry]) => {
         this.size = entry.contentRect;
@@ -236,8 +353,13 @@
         const pixelHeight = Math.round(height * scale);
         const resized = canvas.width !== pixelWidth || canvas.height !== pixelHeight;
         const last = this.lastDraw;
-        const changed = !last || last.center !== layout.center || last.activeNode !== layout.activeNode ||
-          last.progress !== layout.progress || last.playing !== layout.playing;
+        const transfer = layout.transfer;
+        const changed = !last || last.center !== layout.center || last.nodes !== layout.nodes ||
+          last.activeNode !== layout.activeNode || last.progress !== layout.progress ||
+          last.playing !== layout.playing || last.transfer?.id !== transfer?.id ||
+          last.transfer?.progress !== transfer?.progress || last.transfer?.from !== transfer?.from ||
+          last.transfer?.to !== transfer?.to || last.transfer?.completed !== transfer?.completed ||
+          last.transfer?.tone !== transfer?.tone;
         if (resized) {
           canvas.width = pixelWidth;
           canvas.height = pixelHeight;
@@ -257,7 +379,8 @@
       this.animationFrame = requestAnimationFrame(this.frame);
     }
 
-    draw({ nodes, center, pool, activity, activeNode, progress }) {
+    draw(layout) {
+      const { nodes, center, pool, activity, completed, activeNode, progress, transfer } = layout;
       if (!center || center.r <= 0) return;
       const { context, elapsed } = this;
       const inbound = pool && curve(pool, center, -center.r * 0.14);
@@ -267,9 +390,25 @@
         drawCurve(context, outbound, 'rgba(202, 210, 212, 0.12)');
       }
 
+      if (completed && nodes[3]) {
+        drawPolyline(context, completionLeg(center, nodes[3], completed), 'rgba(148, 230, 181, 0.27)', 0.85);
+      }
+
       const routes = drawNodes(context, center, nodes, activeNode, elapsed);
       drawOrbits(context, center, elapsed);
       drawGlobe(context, center, elapsed);
+
+      if (transfer && Number.isFinite(transfer.progress)) {
+        const cached = this.transferPath;
+        const key = [transfer.from, transfer.to, transfer.completed].join(':');
+        if (!cached || cached.center !== center || cached.nodes !== nodes || cached.pool !== pool ||
+            cached.completed !== completed || cached.key !== key) {
+          this.transferPath = { center, nodes, pool, completed, key, path: createTransferPath(layout, transfer) };
+        }
+        const path = this.transferPath.path;
+        if (path?.length) this.packetPosition = drawTransfer(context, path, transfer);
+        return;
+      }
 
       const target = routes[activeNode];
       if (!target || !Number.isFinite(progress)) return;

@@ -26,22 +26,13 @@
 
     <section class="board" aria-label="任务调度动画">
       <canvas id="network" aria-hidden="true"></canvas>
-      <div class="pools">
-        <section class="pool" id="active-pool" aria-labelledby="active-pool-title">
-          <header class="pool-heading">
-            <h2 id="active-pool-title"><span class="pool-symbol" aria-hidden="true"></span>任务池</h2>
-            <span id="queue-count" class="pool-count mono"></span>
-          </header>
-          <ol id="queue" class="queue"></ol>
-        </section>
-        <section class="pool pool-completed" id="completed-pool" aria-labelledby="completed-pool-title">
-          <header class="pool-heading">
-            <h2 id="completed-pool-title"><span class="pool-symbol" aria-hidden="true"></span>已完成池</h2>
-            <span id="completed-count" class="pool-count mono"></span>
-          </header>
-          <ol id="completed-queue" class="queue"></ol>
-        </section>
-      </div>
+      <section class="pool" id="active-pool" aria-labelledby="active-pool-title">
+        <header class="pool-heading">
+          <h2 id="active-pool-title"><span class="pool-symbol" aria-hidden="true"></span>任务池</h2>
+          <span id="queue-count" class="pool-count mono"></span>
+        </header>
+        <ol id="queue" class="queue"></ol>
+      </section>
 
       <div class="stage" id="stage">
         <div id="nodes" class="nodes" aria-label="任务状态节点"></div>
@@ -52,11 +43,21 @@
         <div class="stage-caption" id="stage-caption"></div>
       </div>
 
-      <section class="activity lane">
-        <header class="lane-heading"><h2>流转记录</h2><span id="activity-kind" class="subtle">演示</span></header>
-        <ol id="events" class="events"></ol>
-        <p id="empty-events" class="lane-note">等待演示开始</p>
-      </section>
+      <div class="completion-lane">
+        <section class="pool pool-completed" id="completed-pool" aria-labelledby="completed-pool-title">
+          <header class="pool-heading">
+            <h2 id="completed-pool-title"><span class="pool-symbol" aria-hidden="true"></span>已完成池</h2>
+            <span id="completed-count" class="pool-count mono"></span>
+          </header>
+          <ol id="completed-queue" class="queue"></ol>
+        </section>
+
+        <section class="activity" aria-labelledby="activity-title">
+          <header class="lane-heading"><h2 id="activity-title">流转记录</h2><span id="activity-kind" class="subtle">演示</span></header>
+          <ol id="events" class="events"></ol>
+          <p id="empty-events" class="lane-note">等待演示开始</p>
+        </section>
+      </div>
 
       <div id="packet" class="packet mono" aria-hidden="true" hidden></div>
     </section>
@@ -65,7 +66,7 @@
 
     <footer class="transport">
       <div class="playback">
-        <button type="button" class="icon-button" id="playback" aria-label="暂停演示" title="暂停或播放"><span id="play-symbol" class="pause-sign" aria-hidden="true"></span></button>
+        <button type="button" class="icon-button" id="playback" aria-label="播放演示" title="暂停或播放"><span id="play-symbol" class="play-sign" aria-hidden="true"></span></button>
         <button type="button" class="icon-button" id="restart" aria-label="重新播放" title="重新播放">↺</button>
         <output id="time" class="mono" for="timeline">00:00</output>
       </div>

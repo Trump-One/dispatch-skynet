@@ -39,6 +39,9 @@ const LINEAR_STATUS_LABELS = new Map([
 
 const STEP_MS = 2450;
 const TRAVEL_MS = 1900;
+const LIVE_TRAVEL_MS = 2050;
+const AMBIENT_INTERVAL_MS = 3100;
+const ACTIVE_ROUTES = [0, 1, 2, 4];
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
   timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false
@@ -68,6 +71,11 @@ let timelineGeometry = null;
 let lastSnapshot = null;
 let liveRevision = "";
 let liveChanges = [];
+let ambientTasks = [];
+let ambientIndex = 0;
+let nextAmbientAt = 0;
+let currentFlow = null;
+const pendingFlows = [];
 const browserTranslations = new Map();
 let updateTranslator;
 
@@ -257,8 +265,7 @@ function queueRow(task) {
 }
 
 function renderPools({ loading = false } = {}) {
-  const pools = document.querySelector(".pools");
-  const focused = pools.contains(document.activeElement) && document.activeElement.dataset.taskKey;
+  const focused = document.activeElement?.closest(".pool") && document.activeElement.dataset.taskKey;
   const sections = [
     ["queue", "queue-count", tasks.filter((task) => task.route !== 3), "暂无待处理或进行中的任务"],
     ["completed-queue", "completed-count", tasks.filter((task) => task.completed), "暂无已完成的任务"]
@@ -271,15 +278,14 @@ function renderPools({ loading = false } = {}) {
     if (!records.length) list.append(element("li", "empty", loading ? "正在读取任务" : empty));
     list.scrollTop = previousScroll;
   }
-  if (focused) pools.querySelector(`[data-task-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+  if (focused) document.querySelector(`.pool [data-task-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
 }
 
 function highlightPoolTask(key) {
   if (replayTaskKey === key) return;
-  const pools = document.querySelector(".pools");
-  pools.querySelector(".current")?.classList.remove("current");
+  document.querySelector(".pool .current")?.classList.remove("current");
   replayTaskKey = key;
-  if (key) pools.querySelector(`[data-task-key="${CSS.escape(key)}"]`)?.parentElement.classList.add("current");
+  if (key) document.querySelector(`.pool [data-task-key="${CSS.escape(key)}"]`)?.parentElement.classList.add("current");
 }
 
 function eventRow(task, index) {
@@ -322,7 +328,6 @@ function paint(target, force = false) {
   const caption = $("stage-caption");
   if (task) {
     caption.replaceChildren(element("span", "mono", task.id), document.createTextNode(`→ ${ROUTES[task.route].title}`));
-    $("packet").textContent = task.id;
   } else if (liveMode && liveChanges.length) {
     const latest = liveChanges[0].task;
     caption.replaceChildren(element("span", "mono", latest.id), document.createTextNode(`→ ${ROUTES[latest.route].title}`));
@@ -346,6 +351,8 @@ function setPlaying(value) {
   $("playback").setAttribute("aria-label", playing ? "暂停演示" : "播放演示");
   $("play-symbol").className = playing ? "pause-sign" : "play-sign";
   if (playing) {
+    if (currentFlow?.tone === "live") pendingFlows.unshift({ task: currentFlow.task, from: currentFlow.from });
+    currentFlow = null;
     if (liveMode) paint(elapsed, true);
     playbackFrame = requestAnimationFrame(tick);
   }
@@ -374,32 +381,82 @@ function measureNetwork() {
   const radius = Math.min(stage.height * (compact ? .275 : .305), stage.width * (compact ? .26 : .184));
   const center = { x: core.left + core.width / 2 - bounds.left, y: core.top + core.height / 2 - bounds.top, r: radius };
   const pool = $("active-pool").getBoundingClientRect();
-  const activity = document.querySelector(".activity").getBoundingClientRect();
+  const finished = $("completed-pool").getBoundingClientRect();
   $("core").style.setProperty("--globe-caption", `${radius + core.height / 2 + 11}px`);
   timelineGeometry = {
     center,
+    width: bounds.width,
     coreRadius: core.width / 2,
     nodes: controls.map(({ control }) => {
       const rect = control.getBoundingClientRect();
-      return { x: rect.left + rect.width / 2 - bounds.left, y: rect.top + rect.height / 2 - bounds.top, active: !control.classList.contains("quiet") };
+      return {
+        x: rect.left + rect.width / 2 - bounds.left, y: rect.top + rect.height / 2 - bounds.top,
+        width: rect.width, height: rect.height, active: !control.classList.contains("quiet")
+      };
     }),
-    pool: compact ? null : { x: pool.right - bounds.left, y: pool.top + pool.height / 2 - bounds.top },
-    activity: compact ? null : { x: activity.left - bounds.left, y: activity.top + 147 - bounds.top }
+    pool: compact ? null : { x: pool.right - bounds.left, y: center.y },
+    completed: compact
+      ? { x: finished.left + finished.width / 2 - bounds.left, y: finished.top - bounds.top }
+      : { x: finished.left - bounds.left, y: finished.top + finished.height * .55 - bounds.top }
   };
+}
+
+function selectLiveFlow(now) {
+  if (currentFlow?.tone === "ambient" && pendingFlows.length) currentFlow = null;
+  if (currentFlow && now - currentFlow.startedAt >= currentFlow.duration) {
+    if (currentFlow.tone === "live" && currentFlow.task.completed) {
+      $("completed-pool").animate([{ borderColor: "#9dc6ad" }, { borderColor: "#33443d" }], 850);
+    }
+    currentFlow = null;
+  }
+  if (currentFlow) return currentFlow;
+
+  const change = pendingFlows.shift();
+  if (change) {
+    currentFlow = { ...change, tone: "live", startedAt: now, duration: LIVE_TRAVEL_MS };
+  } else if (ambientTasks.length && now >= nextAmbientAt && !dialog.open) {
+    const task = ambientTasks[ambientIndex++ % ambientTasks.length];
+    currentFlow = { task, from: null, tone: "ambient", startedAt: now, duration: TRAVEL_MS };
+    nextAmbientAt = now + AMBIENT_INTERVAL_MS;
+  }
+  return currentFlow;
 }
 
 function networkLayout() {
   if (!timelineGeometry) measureNetwork();
-  const progress = elapsed % STEP_MS / TRAVEL_MS;
-  return { ...timelineGeometry, activeNode, playing, progress: !reducedMotion.matches && activeNode >= 0 && progress < 1 ? progress : null };
+  const now = performance.now();
+  const demo = playing ? sequence[Math.floor(elapsed / STEP_MS)] : null;
+  const flow = !playing && !reducedMotion.matches && liveMode ? selectLiveFlow(now) : null;
+  const entry = demo || flow?.task;
+  const progress = demo ? elapsed % STEP_MS / TRAVEL_MS : flow ? (now - flow.startedAt) / flow.duration : 1;
+  const transfer = !reducedMotion.matches && entry && progress < 1 ? {
+    id: entry.id, from: flow?.from ?? null, to: entry.route, progress, completed: entry.completed, tone: flow?.tone || "demo"
+  } : null;
+  return {
+    ...timelineGeometry,
+    activeNode: entry?.route ?? (playing ? activeNode : -1),
+    playing: playing || Boolean(liveMode && (ambientTasks.length || flow)),
+    transfer
+  };
 }
 
 function trackPacket(position) {
   const packet = $("packet");
-  const { center, coreRadius } = timelineGeometry;
-  const passesCore = position && Math.hypot(position.x - center.x, position.y - center.y - 13) < coreRadius + 12;
-  packet.hidden = !position || passesCore || !playing;
-  if (!packet.hidden) packet.style.transform = `translate(${position.x}px, ${position.y - 13}px) translate(-50%, -100%)`;
+  const demo = playing ? sequence[Math.floor(elapsed / STEP_MS)] : null;
+  const task = demo || currentFlow?.task;
+  packet.hidden = !position || !task || reducedMotion.matches;
+  if (packet.hidden) return;
+  const title = taskTitle(task);
+  if (packet.dataset.id !== task.id || packet.dataset.title !== title) {
+    packet.replaceChildren(element("span", "packet-id mono", task.id), element("span", "packet-title", title));
+    packet.dataset.id = task.id;
+    packet.dataset.title = title;
+  }
+  packet.dataset.tone = position.tone || (demo ? "demo" : currentFlow.tone);
+  packet.dataset.completed = String(task.completed);
+  const margin = Math.min(95, timelineGeometry.width * .17);
+  const x = Math.max(margin, Math.min(timelineGeometry.width - margin, position.x));
+  packet.style.transform = `translate(${x}px, ${position.y - 11}px) translate(-50%, -100%)`;
 }
 
 function showDialog() {
@@ -595,12 +652,17 @@ function updateLiveTasks(records, snapshot) {
     const sameStatus = old.status === task.status;
     const previous = sameStatus ? ROUTES[old.route].title : statusLabel(old);
     const status = sameStatus ? ROUTES[task.route].title : statusLabel(task);
-    return [{ task, previous, status, at }];
+    return [{ task, previous, status, at, from: old.route }];
   });
   tasks = records;
+  ambientTasks = tasks.filter((task) => ACTIVE_ROUTES.includes(task.route));
   renderTaskCounts();
   renderPools();
   if (changes.length) {
+    if (!reducedMotion.matches) {
+      pendingFlows.push(...changes.map(({ task, from }) => ({ task, from })));
+      if (pendingFlows.length > 8) pendingFlows.splice(0, pendingFlows.length - 8);
+    }
     liveChanges = [...changes, ...liveChanges].slice(0, 30);
     $("events").replaceChildren(...liveChanges.map(liveEventRow));
     $("empty-events").hidden = true;
@@ -698,6 +760,10 @@ const observer = new ResizeObserver(measureNetwork);
 observer.observe($("stage"));
 new window.DispatchNetwork($("network"), networkLayout, trackPacket);
 reducedMotion.addEventListener("change", (event) => {
-  if (event.matches) setPlaying(false);
+  if (event.matches) {
+    currentFlow = null;
+    pendingFlows.length = 0;
+    setPlaying(false);
+  }
 });
 if (!liveMode && !reducedMotion.matches) setPlaying(true);
