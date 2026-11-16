@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>任务调度中心 · Dispatch Skynet</title>
+  <title>任务调度中心</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -13,7 +13,6 @@
       <div class="identity">
         <span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
         <h1>任务调度中心</h1>
-        <span class="wordmark">DISPATCH SKYNET</span>
       </div>
       <div class="utilities">
         <div id="live-sources" class="live-sources" hidden>
@@ -27,16 +26,27 @@
 
     <section class="board" aria-label="任务调度动画">
       <canvas id="network" aria-hidden="true"></canvas>
-      <section class="pool lane">
-        <header class="lane-heading"><h2>任务池</h2><span id="queue-count" class="mono"></span></header>
-        <ol id="queue" class="queue"></ol>
-        <p class="lane-note">点击任务可查看详情</p>
-      </section>
+      <div class="pools">
+        <section class="pool" id="active-pool" aria-labelledby="active-pool-title">
+          <header class="pool-heading">
+            <h2 id="active-pool-title"><span class="pool-symbol" aria-hidden="true"></span>任务池</h2>
+            <span id="queue-count" class="pool-count mono"></span>
+          </header>
+          <ol id="queue" class="queue"></ol>
+        </section>
+        <section class="pool pool-completed" id="completed-pool" aria-labelledby="completed-pool-title">
+          <header class="pool-heading">
+            <h2 id="completed-pool-title"><span class="pool-symbol" aria-hidden="true"></span>已完成池</h2>
+            <span id="completed-count" class="pool-count mono"></span>
+          </header>
+          <ol id="completed-queue" class="queue"></ol>
+        </section>
+      </div>
 
       <div class="stage" id="stage">
         <div id="nodes" class="nodes" aria-label="任务状态节点"></div>
         <div class="core" id="core" aria-hidden="true">
-          <div class="core-disc"><strong>调度中枢</strong><span class="mono">CORE / 06</span></div>
+          <div class="core-disc"><strong>调度中枢</strong><span class="mono">状态分流</span></div>
           <span class="core-caption">6 个状态节点</span>
         </div>
         <div class="stage-caption" id="stage-caption"></div>
@@ -66,7 +76,7 @@
 
   <dialog id="task-dialog" aria-labelledby="dialog-title">
     <header class="dialog-header">
-      <div class="dialog-title"><span class="eyebrow mono" id="dialog-kicker">TASK INDEX</span><h2 id="dialog-title">全部任务</h2></div>
+      <div class="dialog-title"><span class="eyebrow mono" id="dialog-kicker">任务列表</span><h2 id="dialog-title">全部任务</h2></div>
       <button type="button" class="icon-button close" id="close-dialog" aria-label="关闭">×</button>
     </header>
     <div id="task-index">
@@ -80,6 +90,7 @@
       </div>
       <div id="index-caption" class="index-caption"></div>
       <ul id="index-results" class="index-results"></ul>
+      <div id="translation-controls" class="import-bar" hidden></div>
       <footer id="import-bar" class="import-bar">
         <label for="import-snapshot" class="button">载入任务快照</label>
         <input id="import-snapshot" type="file" accept=".json,application/json" aria-label="载入任务快照">
@@ -90,6 +101,7 @@
   </dialog>
 
   <script src="network.js"></script>
+  <script src="translation.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

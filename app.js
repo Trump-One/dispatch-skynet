@@ -17,9 +17,9 @@ const EXAMPLE = {
 const ROUTES = [
   { title: "开发中", source: "Linear" },
   { title: "待验收", source: "Linear" },
-  { title: "PR 审核", source: "GitHub" },
+  { title: "请求审核", source: "GitHub" },
   { title: "已结束", source: "Linear / GitHub" },
-  { title: "PR 草稿", source: "GitHub" },
+  { title: "请求草稿", source: "GitHub" },
   { title: "待处理", source: "Linear" }
 ];
 
@@ -29,6 +29,13 @@ const METRICS = [
   { title: "待确认", routes: [1, 2] },
   { title: "已结束", routes: [3] }
 ];
+
+const LINEAR_STATUS_LABELS = new Map([
+  ["backlog", "待规划"], ["todo", "待处理"], ["to do", "待处理"], ["triage", "待分诊"],
+  ["in progress", "进行中"], ["in review", "审核中"], ["in testing", "测试中"],
+  ["ready for review", "待审核"], ["done", "已完成"], ["completed", "已完成"],
+  ["canceled", "已取消"], ["cancelled", "已取消"], ["duplicate", "重复任务"], ["blocked", "受阻"]
+]);
 
 const STEP_MS = 2450;
 const TRAVEL_MS = 1900;
@@ -53,6 +60,7 @@ let frameTime = 0;
 let playbackFrame = 0;
 let activeStep = -1;
 let activeNode = -1;
+let replayTaskKey = null;
 let panelRoutes = null;
 let panelSource = "all";
 let detailView = null;
@@ -60,6 +68,8 @@ let timelineGeometry = null;
 let lastSnapshot = null;
 let liveRevision = "";
 let liveChanges = [];
+const browserTranslations = new Map();
+let updateTranslator;
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -79,6 +89,16 @@ function displayTitle(title) {
   return title.replace(/^[a-z]+(?:\([^)]+\))?!?:\s+/i, "").replace(/\s+\([A-Z]+-\d+\)$/, "");
 }
 
+function taskTitle(task) {
+  return task.titleZh || browserTranslations.get(task.title) || displayTitle(task.title);
+}
+
+function statusLabel(task) {
+  return task.source === "linear"
+    ? LINEAR_STATUS_LABELS.get(task.status.trim().toLowerCase()) || task.status
+    : task.status;
+}
+
 function dateString(value) {
   const millis = Date.parse(value);
   return Number.isFinite(millis) ? dateFormatter.format(millis) : "";
@@ -93,9 +113,13 @@ function safeLink(value) {
   }
 }
 
+function issueIsCompleted(issue) {
+  return issue.statusType === "completed" || /^(done|completed|已完成)$/i.test(issue.status.trim());
+}
+
 function routeForIssue(issue) {
   const status = (issue.status || "").toLowerCase();
-  if (["completed", "canceled"].includes(issue.statusType) || /^(done|completed|canceled|cancelled|已完成|已取消)$/.test(status)) return 3;
+  if (issueIsCompleted(issue) || issue.statusType === "canceled" || /^(canceled|cancelled|已取消)$/.test(status)) return 3;
   if (/review|qa|test|acceptance|审核|验收/.test(status)) return 1;
   if (issue.statusType === "started" || /in progress|进行中/.test(status)) return 0;
   return 5;
@@ -130,8 +154,9 @@ function normalize(snapshot) {
     }
     append({
       key: `linear:${issue.id}`, id: issue.id, title: issue.title,
-      source: "linear", status: issue.status, route: routeForIssue(issue),
-      url: safeLink(issue.url), updatedAt: issue.updatedAt, project: issue.project
+      titleZh: typeof issue.titleZh === "string" ? issue.titleZh : "",
+      source: "linear", status: issue.status, route: routeForIssue(issue), completed: issueIsCompleted(issue),
+      url: safeLink(issue.url), updatedAt: issue.updatedAt, project: issue.projectZh || issue.project
     });
   }
   for (const pull of snapshot.pullRequests) {
@@ -143,7 +168,8 @@ function normalize(snapshot) {
     const route = pull.state !== "OPEN" ? 3 : pull.isDraft ? 4 : 2;
     append({
       key: `github:${pull.number}`, id: `#${pull.number}`, title: pull.title,
-      source: "github", status: prStatus(pull), route, issueId: pull.issueId,
+      titleZh: typeof pull.titleZh === "string" ? pull.titleZh : "",
+      source: "github", status: prStatus(pull), route, issueId: pull.issueId, completed: pull.state === "MERGED",
       url: safeLink(pull.url), updatedAt: pull.updatedAt || pull.createdAt
     });
   }
@@ -180,6 +206,7 @@ function setSnapshot(snapshot, isExample) {
   $("snapshot-label").textContent = isExample ? "示例任务" : date ? `快照 · ${date.slice(5)}` : "本地快照";
   $("snapshot-label").title = date ? `任务快照 ${date}（北京时间）` : "";
   renderTaskCounts();
+  renderPools();
   prepareSequence();
 }
 
@@ -193,7 +220,7 @@ function renderTaskCounts() {
   for (const metric of summaries) {
     const group = tasks.filter((task) => metric.routes.includes(task.route));
     metric.count.textContent = group.length;
-    if (group.length) metric.detail.replaceChildren(element("b", "mono", group[0].id), document.createTextNode(`  ${displayTitle(group[0].title)}`));
+    if (group.length) metric.detail.replaceChildren(element("b", "mono", group[0].id), document.createTextNode(`  ${taskTitle(group[0])}`));
     else metric.detail.textContent = "暂无任务";
   }
 }
@@ -217,23 +244,52 @@ function clock(millis) {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-function queueRow(task, selected) {
-  const row = element("li", selected ? "current" : null);
+function queueRow(task) {
+  const row = element("li", task.key === replayTaskKey ? "current" : null);
   const open = button("queue-entry", () => openDetail(task));
-  open.title = task.title;
-  open.append(element("span", "mono", task.id), element("strong", null, displayTitle(task.title)));
+  open.dataset.taskKey = task.key;
+  open.title = taskTitle(task);
+  const meta = element("span", "queue-entry-meta");
+  meta.append(element("span", "mono", task.id), element("small", null, statusLabel(task)));
+  open.append(meta, element("strong", null, taskTitle(task)));
   row.append(open);
   return row;
+}
+
+function renderPools({ loading = false } = {}) {
+  const pools = document.querySelector(".pools");
+  const focused = pools.contains(document.activeElement) && document.activeElement.dataset.taskKey;
+  const sections = [
+    ["queue", "queue-count", tasks.filter((task) => task.route !== 3), "暂无待处理或进行中的任务"],
+    ["completed-queue", "completed-count", tasks.filter((task) => task.completed), "暂无已完成的任务"]
+  ];
+  for (const [listId, countId, records, empty] of sections) {
+    const list = $(listId);
+    const previousScroll = list.scrollTop;
+    $(countId).textContent = records.length;
+    list.replaceChildren(...records.map(queueRow));
+    if (!records.length) list.append(element("li", "empty", loading ? "正在读取任务" : empty));
+    list.scrollTop = previousScroll;
+  }
+  if (focused) pools.querySelector(`[data-task-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+}
+
+function highlightPoolTask(key) {
+  if (replayTaskKey === key) return;
+  const pools = document.querySelector(".pools");
+  pools.querySelector(".current")?.classList.remove("current");
+  replayTaskKey = key;
+  if (key) pools.querySelector(`[data-task-key="${CSS.escape(key)}"]`)?.parentElement.classList.add("current");
 }
 
 function eventRow(task, index) {
   const row = element("li");
   const open = button("event-entry", () => openDetail(task));
-  open.title = task.title;
+  open.title = taskTitle(task);
   open.append(
     element("span", "mono", clock(index * STEP_MS + TRAVEL_MS)),
     element("strong", null, `${task.id} → ${ROUTES[task.route].title}`),
-    element("small", null, task.status)
+    element("small", null, statusLabel(task))
   );
   row.append(open);
   return row;
@@ -255,11 +311,8 @@ function paint(target, force = false) {
   const showDemo = !liveMode || playing || elapsed > 0;
   const task = showDemo ? sequence[step] : null;
   activeNode = task ? task.route : -1;
+  highlightPoolTask(arrived ? null : task?.key ?? null);
   if (!liveMode) {
-    const queue = sequence.slice(step + Number(arrived));
-    $("queue-count").textContent = queue.length;
-    $("queue").replaceChildren(...queue.map((entry, index) => queueRow(entry, index === 0 && !arrived)));
-    if (queue.length === 0) $("queue").append(element("li", "empty", sequence.length ? "本轮任务已展示" : "任务池为空"));
     const delivered = sequence.slice(0, step + Number(arrived));
     $("events").replaceChildren(...delivered.map(eventRow).reverse());
     $("empty-events").hidden = delivered.length > 0;
@@ -320,7 +373,7 @@ function measureNetwork() {
   const compact = matchMedia("(max-width: 760px)").matches;
   const radius = Math.min(stage.height * (compact ? .275 : .305), stage.width * (compact ? .26 : .184));
   const center = { x: core.left + core.width / 2 - bounds.left, y: core.top + core.height / 2 - bounds.top, r: radius };
-  const pool = document.querySelector(".pool").getBoundingClientRect();
+  const pool = $("active-pool").getBoundingClientRect();
   const activity = document.querySelector(".activity").getBoundingClientRect();
   $("core").style.setProperty("--globe-caption", `${radius + core.height / 2 + 11}px`);
   timelineGeometry = {
@@ -330,7 +383,7 @@ function measureNetwork() {
       const rect = control.getBoundingClientRect();
       return { x: rect.left + rect.width / 2 - bounds.left, y: rect.top + rect.height / 2 - bounds.top, active: !control.classList.contains("quiet") };
     }),
-    pool: compact ? null : { x: pool.right - bounds.left, y: pool.top + 130 - bounds.top },
+    pool: compact ? null : { x: pool.right - bounds.left, y: pool.top + pool.height / 2 - bounds.top },
     activity: compact ? null : { x: activity.left - bounds.left, y: activity.top + 147 - bounds.top }
   };
 }
@@ -361,7 +414,7 @@ function openIndex({ routes = null, title = "全部任务", reset = true } = {})
     $("find-task").value = "";
     $("import-status").textContent = "";
   }
-  $("dialog-kicker").textContent = "TASK INDEX";
+  $("dialog-kicker").textContent = "任务列表";
   $("dialog-title").textContent = title;
   $("task-index").hidden = false;
   $("task-detail").hidden = true;
@@ -377,8 +430,8 @@ function taskRow(task) {
   open.dataset.taskKey = task.key;
   open.append(
     element("span", "mono", `${task.source === "linear" ? "Linear" : "GitHub"} · ${task.id}`),
-    element("small", null, task.status),
-    element("strong", null, task.title)
+    element("small", null, statusLabel(task)),
+    element("strong", null, taskTitle(task))
   );
   row.append(open);
   return row;
@@ -389,7 +442,7 @@ function renderIndex(preservePosition = false) {
   const results = tasks.filter((task) =>
     (!panelRoutes || panelRoutes.includes(task.route)) &&
     (panelSource === "all" || panelSource === task.source) &&
-    (!query || [task.title, task.id, task.issueId].some((text) => typeof text === "string" && text.toLowerCase().includes(query)))
+    (!query || [task.title, taskTitle(task), task.id, task.issueId].some((text) => typeof text === "string" && text.toLowerCase().includes(query)))
   );
   document.querySelectorAll(".tabs button").forEach((control) => {
     control.setAttribute("aria-pressed", String(control.dataset.source === panelSource));
@@ -421,7 +474,7 @@ function renderDetail(preservePosition = false) {
   const current = tasks.find((entry) => entry.key === detailView.task.key);
   const task = current || detailView.task;
   detailView.task = task;
-  $("dialog-kicker").textContent = task.source === "linear" ? "LINEAR ISSUE" : "GITHUB PULL REQUEST";
+  $("dialog-kicker").textContent = task.source === "linear" ? "Linear 任务" : "GitHub 合并请求";
   $("dialog-title").textContent = task.id;
   $("task-index").hidden = true;
   const detail = $("task-detail");
@@ -431,11 +484,11 @@ function renderDetail(preservePosition = false) {
   const back = button("button", () => openIndex(detailView.previous));
   back.dataset.action = "back";
   back.textContent = "← 返回任务列表";
-  detail.replaceChildren(back, element("h3", "detail-title", task.title));
+  detail.replaceChildren(back, element("h3", "detail-title", taskTitle(task)));
   if (liveMode && !current) detail.append(element("p", "empty", "这条任务已离开当前同步范围。"));
   const meta = element("dl", "detail-meta");
   const fields = [
-    ["当前状态", task.status],
+    ["当前状态", statusLabel(task)],
     ["调度节点", ROUTES[task.route].title],
     ["项目", task.project],
     ["更新时间", dateString(task.updatedAt)]
@@ -462,6 +515,11 @@ function renderDetail(preservePosition = false) {
     actions.append(link);
   }
   detail.append(actions);
+  if (task.titleZh || browserTranslations.has(task.title)) {
+    const original = element("details", "original-title");
+    original.append(element("summary", null, "查看标题原文"), element("p", null, task.title));
+    detail.append(original);
+  }
   const related = tasks.filter((entry) =>
     task.source === "linear" ? entry.source === "github" && entry.issueId === task.id
       : entry.source === "linear" && entry.id === task.issueId
@@ -512,12 +570,13 @@ function renderLiveHealth(connection) {
 }
 
 function liveEventRow({ task, previous, status, at }) {
+  task = tasks.find((entry) => entry.key === task.key) || task;
   const row = element("li");
   const open = button("event-entry", () => openDetail(task));
-  open.title = task.title;
+  open.title = taskTitle(task);
   open.append(
     element("span", "mono", syncTimeFormatter.format(at)),
-    element("strong", null, `${task.id} · ${displayTitle(task.title)}`),
+    element("strong", null, `${task.id} · ${taskTitle(task)}`),
     element("small", null, `${previous} → ${status}`)
   );
   row.append(open);
@@ -534,16 +593,13 @@ function updateLiveTasks(records, snapshot) {
     if (!old || (old.status === task.status && old.route === task.route)) return [];
     const at = Date.parse(snapshot.sources?.[task.source]?.checkedAt) || Date.parse(snapshot.snapshotAt) || Date.now();
     const sameStatus = old.status === task.status;
-    const previous = sameStatus ? ROUTES[old.route].title : old.status;
-    const status = sameStatus ? ROUTES[task.route].title : task.status;
+    const previous = sameStatus ? ROUTES[old.route].title : statusLabel(old);
+    const status = sameStatus ? ROUTES[task.route].title : statusLabel(task);
     return [{ task, previous, status, at }];
   });
   tasks = records;
   renderTaskCounts();
-  const queue = tasks.filter((task) => task.route !== 3);
-  $("queue-count").textContent = queue.length;
-  $("queue").replaceChildren(...queue.map((task) => queueRow(task, false)));
-  if (queue.length === 0) $("queue").append(element("li", "empty", "暂无进行中或待处理的任务"));
+  renderPools();
   if (changes.length) {
     liveChanges = [...changes, ...liveChanges].slice(0, 30);
     $("events").replaceChildren(...liveChanges.map(liveEventRow));
@@ -568,8 +624,8 @@ function startLive() {
   $("activity-kind").textContent = "本次打开";
   $("empty-events").textContent = "状态变化会自动出现在这里";
   $("import-bar").hidden = true;
-  $("queue").append(element("li", "empty", "正在读取任务"));
   renderTaskCounts();
+  renderPools({ loading: true });
   prepareSequence();
   renderLiveHealth("connecting");
   const stream = new EventSource("/api/events");
@@ -582,6 +638,8 @@ function startLive() {
       lastSnapshot = snapshot;
       renderLiveHealth("connected");
       updateLiveTasks(records, snapshot);
+      updateTranslator?.(records.filter((task) => !task.titleZh && /[a-z]{2,}/i.test(task.title) &&
+        !/\p{Script=Han}/u.test(task.title)).map((task) => task.title));
     } catch {
       renderLiveHealth("reconnecting");
     }
@@ -616,7 +674,17 @@ $("import-snapshot").addEventListener("change", async (event) => {
   }
 });
 
-if (liveMode) startLive();
+if (liveMode) {
+  updateTranslator = window.createTaskTranslator?.((translations) => {
+    for (const [title, translated] of Object.entries(translations)) browserTranslations.set(title, translated);
+    renderTaskCounts();
+    renderPools();
+    if (liveChanges.length) $("events").replaceChildren(...liveChanges.map(liveEventRow));
+    if (dialog.open && detailView) renderDetail(true);
+    else if (dialog.open) renderIndex(true);
+  });
+  startLive();
+}
 else {
   try {
     setSnapshot(window.DISPATCH_SNAPSHOT || EXAMPLE, !window.DISPATCH_SNAPSHOT);

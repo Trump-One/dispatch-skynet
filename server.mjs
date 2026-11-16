@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readGitHub, readLinear } from "./providers.mjs";
@@ -40,6 +40,7 @@ const staticAssets = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/index.html", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
+  ["/translation.js", ["translation.js", "text/javascript; charset=utf-8"]],
   ["/network.js", ["network.js", "text/javascript; charset=utf-8"]],
   ["/style.css", ["style.css", "text/css; charset=utf-8"]]
 ]);
@@ -66,6 +67,9 @@ export async function startServer(options = {}) {
   const interval = intervalSeconds * 1000;
   const localDirectory = options.localDirectory ?? resolve(root, ".dispatch");
   const checkpointPath = resolve(localDirectory, "snapshot.json");
+  const translationPath = resolve(localDirectory, "translations.json");
+  let translations = null;
+  let translationVersion;
   const config = {
     linearKey: process.env.LINEAR_API_KEY,
     linearAssignee: process.env.LINEAR_ASSIGNEE,
@@ -99,10 +103,31 @@ export async function startServer(options = {}) {
     }
   };
 
-  function snapshot() {
-    const { linear, github } = feeds;
+  function translatedRows() {
+    let file;
+    try {
+      file = statSync(translationPath, { throwIfNoEntry: false });
+    } catch {
+      file = null;
+    }
+    const version = file ? `${file.mtimeMs}:${file.size}` : null;
+    if (version !== translationVersion) {
+      translations = file ? readJSON(translationPath) : null;
+      translationVersion = version;
+    }
+    const translate = (text) => translations && typeof text === "string" && Object.hasOwn(translations, text) &&
+      typeof translations[text] === "string" ? translations[text] : undefined;
     return {
-      snapshotAt, intervalSeconds, issues: linear.rows, pullRequests: github.rows,
+      issues: feeds.linear.rows.map((issue) => ({
+        ...issue, titleZh: translate(issue.title) || issue.titleZh, projectZh: translate(issue.project) || issue.projectZh
+      })),
+      pullRequests: feeds.github.rows.map((pull) => ({ ...pull, titleZh: translate(pull.title) || pull.titleZh }))
+    };
+  }
+
+  function snapshot() {
+    return {
+      snapshotAt, intervalSeconds, ...translatedRows(),
       sources: Object.fromEntries(Object.entries(feeds).map(([name, { state, checkedAt, reason }]) =>
         [name, { state, checkedAt, reason }]))
     };
@@ -123,9 +148,11 @@ export async function startServer(options = {}) {
   function save() {
     try {
       mkdirSync(localDirectory, { recursive: true, mode: 0o700 });
-      const { issues, pullRequests } = snapshot();
       const { linear, github } = feeds;
-      const data = { snapshotAt, issues, pullRequests, linearCheckedAt: linear.checkedAt, githubCheckedAt: github.checkedAt };
+      const data = {
+        snapshotAt, issues: linear.rows, pullRequests: github.rows,
+        linearCheckedAt: linear.checkedAt, githubCheckedAt: github.checkedAt
+      };
       const temporary = `${checkpointPath}.tmp`;
       writeFileSync(temporary, JSON.stringify(data) + "\n", { mode: 0o600 });
       renameSync(temporary, checkpointPath);
