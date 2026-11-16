@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>任务调度中心 · Dispatch Skynet</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="console">
+    <header class="masthead">
+      <div class="identity">
+        <span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <h1>任务调度中心</h1>
+        <span class="wordmark">DISPATCH SKYNET</span>
+      </div>
+      <div class="utilities">
+        <span class="snapshot"><span class="live-dot" aria-hidden="true"></span><span id="snapshot-label"></span></span>
+        <button type="button" class="button" id="open-tasks">全部任务 <span id="total-count" class="mono"></span></button>
+      </div>
+    </header>
+
+    <section class="board" aria-label="任务调度动画">
+      <canvas id="network" aria-hidden="true"></canvas>
+      <section class="pool lane">
+        <header class="lane-heading"><h2>任务池</h2><span id="queue-count" class="mono"></span></header>
+        <ol id="queue" class="queue"></ol>
+        <p class="lane-note">点击任务可查看详情</p>
+      </section>
+
+      <div class="stage" id="stage">
+        <div id="nodes" class="nodes" aria-label="任务状态节点"></div>
+        <div class="core" id="core" aria-hidden="true">
+          <div class="core-disc"><strong>调度中枢</strong><span class="mono">CORE / 06</span></div>
+          <span class="core-caption">6 个状态节点</span>
+        </div>
+        <div class="stage-caption" id="stage-caption"></div>
+      </div>
+
+      <section class="activity lane">
+        <header class="lane-heading"><h2>流转记录</h2><span class="subtle">演示</span></header>
+        <ol id="events" class="events"></ol>
+        <p id="empty-events" class="lane-note">等待演示开始</p>
+      </section>
+
+      <div id="packet" class="packet mono" aria-hidden="true" hidden></div>
+    </section>
+
+    <section class="metrics" id="metrics" aria-label="快照统计"></section>
+
+    <footer class="transport">
+      <div class="playback">
+        <button type="button" class="icon-button" id="playback" aria-label="暂停演示" title="暂停或播放"><span id="play-symbol" class="pause-sign" aria-hidden="true"></span></button>
+        <button type="button" class="icon-button" id="restart" aria-label="重新播放" title="重新播放">↺</button>
+        <output id="time" class="mono" for="timeline">00:00</output>
+      </div>
+      <input type="range" id="timeline" min="0" max="100" value="0" step="1" aria-label="演示进度">
+      <div class="transport-note"><span id="duration" class="mono"></span><span class="transport-label">状态分流演示</span></div>
+    </footer>
+  </main>
+
+  <dialog id="task-dialog" aria-labelledby="dialog-title">
+    <header class="dialog-header">
+      <div class="dialog-title"><span class="eyebrow mono" id="dialog-kicker">TASK INDEX</span><h2 id="dialog-title">全部任务</h2></div>
+      <button type="button" class="icon-button close" id="close-dialog" aria-label="关闭">×</button>
+    </header>
+    <div id="task-index">
+      <div class="index-tools">
+        <div class="tabs" aria-label="任务来源">
+          <button type="button" data-source="all" aria-pressed="true">全部</button>
+          <button type="button" data-source="linear" aria-pressed="false">Linear</button>
+          <button type="button" data-source="github" aria-pressed="false">GitHub</button>
+        </div>
+        <input id="find-task" type="search" placeholder="搜索标题或编号" aria-label="搜索任务">
+      </div>
+      <div id="index-caption" class="index-caption"></div>
+      <ul id="index-results" class="index-results"></ul>
+      <footer id="import-bar" class="import-bar">
+        <label for="import-snapshot" class="button">载入任务快照</label>
+        <input id="import-snapshot" type="file" accept=".json,application/json" aria-label="载入任务快照">
+        <span id="import-status" role="status"></span>
+      </footer>
+    </div>
+    <div id="task-detail" hidden></div>
+  </dialog>
+
+  <script src="network.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
