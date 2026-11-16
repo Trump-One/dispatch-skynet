@@ -36,11 +36,15 @@ const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
   timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false
 });
+const syncTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false
+});
 const $ = (id) => document.getElementById(id);
 const dialog = $("task-dialog");
+const liveMode = location.protocol === "http:" &&
+  document.querySelector('meta[name="dispatch-live"][content="true"]') !== null;
 
 let tasks = [];
-let example = false;
 let sequence = [];
 let elapsed = 0;
 let duration = 0;
@@ -51,7 +55,11 @@ let activeStep = -1;
 let activeNode = -1;
 let panelRoutes = null;
 let panelSource = "all";
+let detailView = null;
 let timelineGeometry = null;
+let lastSnapshot = null;
+let liveRevision = "";
+let liveChanges = [];
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -99,6 +107,7 @@ function prStatus(pull) {
   if (pull.isDraft) return "草稿";
   if (pull.reviewDecision === "CHANGES_REQUESTED") return "要求修改";
   if (pull.reviewDecision === "APPROVED") return "已批准";
+  if (pull.reviewDecision === "REVIEW_REQUIRED") return "待审核";
   return "未合并";
 }
 
@@ -165,26 +174,28 @@ const summaries = METRICS.map((metric) => {
 });
 
 function setSnapshot(snapshot, isExample) {
-  const records = normalize(snapshot);
+  tasks = normalize(snapshot);
   setPlaying(false);
-  tasks = records;
-  example = isExample;
   const date = dateString(snapshot.snapshotAt);
-  $("snapshot-label").textContent = example ? "示例任务" : date ? `快照 · ${date.slice(5)}` : "本地快照";
+  $("snapshot-label").textContent = isExample ? "示例任务" : date ? `快照 · ${date.slice(5)}` : "本地快照";
   $("snapshot-label").title = date ? `任务快照 ${date}（北京时间）` : "";
-  $("total-count").textContent = records.length;
+  renderTaskCounts();
+  prepareSequence();
+}
+
+function renderTaskCounts() {
+  $("total-count").textContent = tasks.length;
   controls.forEach(({ control, count }, index) => {
-    const size = records.filter((task) => task.route === index).length;
+    const size = tasks.filter((task) => task.route === index).length;
     count.textContent = size;
     control.classList.toggle("quiet", size === 0);
   });
   for (const metric of summaries) {
-    const group = records.filter((task) => metric.routes.includes(task.route));
+    const group = tasks.filter((task) => metric.routes.includes(task.route));
     metric.count.textContent = group.length;
     if (group.length) metric.detail.replaceChildren(element("b", "mono", group[0].id), document.createTextNode(`  ${displayTitle(group[0].title)}`));
     else metric.detail.textContent = "暂无任务";
   }
-  prepareSequence();
 }
 
 function prepareSequence(first) {
@@ -241,23 +252,29 @@ function paint(target, force = false) {
   if ($("time").value !== clock(elapsed)) $("time").value = clock(elapsed);
   if (signature === activeStep && !force) return;
   activeStep = signature;
-  const task = sequence[step];
+  const showDemo = !liveMode || playing || elapsed > 0;
+  const task = showDemo ? sequence[step] : null;
   activeNode = task ? task.route : -1;
-  const queue = sequence.slice(step + Number(arrived));
-  $("queue-count").textContent = queue.length;
-  $("queue").replaceChildren(...queue.map((entry, index) => queueRow(entry, index === 0 && !arrived)));
-  if (queue.length === 0) $("queue").append(element("li", "empty", sequence.length ? "本轮任务已展示" : "任务池为空"));
-  const delivered = sequence.slice(0, step + Number(arrived));
-  $("events").replaceChildren(...delivered.map(eventRow).reverse());
-  $("empty-events").hidden = delivered.length > 0;
+  if (!liveMode) {
+    const queue = sequence.slice(step + Number(arrived));
+    $("queue-count").textContent = queue.length;
+    $("queue").replaceChildren(...queue.map((entry, index) => queueRow(entry, index === 0 && !arrived)));
+    if (queue.length === 0) $("queue").append(element("li", "empty", sequence.length ? "本轮任务已展示" : "任务池为空"));
+    const delivered = sequence.slice(0, step + Number(arrived));
+    $("events").replaceChildren(...delivered.map(eventRow).reverse());
+    $("empty-events").hidden = delivered.length > 0;
+  }
   controls.forEach(({ control }, index) => control.classList.toggle("active", arrived && index === activeNode));
   summaries.forEach((metric) => metric.control.classList.toggle("highlight", metric.routes.includes(activeNode)));
   const caption = $("stage-caption");
   if (task) {
     caption.replaceChildren(element("span", "mono", task.id), document.createTextNode(`→ ${ROUTES[task.route].title}`));
     $("packet").textContent = task.id;
+  } else if (liveMode && liveChanges.length) {
+    const latest = liveChanges[0].task;
+    caption.replaceChildren(element("span", "mono", latest.id), document.createTextNode(`→ ${ROUTES[latest.route].title}`));
   } else {
-    caption.textContent = duration ? "本轮演示结束" : "暂无任务";
+    caption.textContent = liveMode ? "监听任务状态" : duration ? "本轮演示结束" : "暂无任务";
   }
 }
 
@@ -275,12 +292,16 @@ function setPlaying(value) {
   frameTime = 0;
   $("playback").setAttribute("aria-label", playing ? "暂停演示" : "播放演示");
   $("play-symbol").className = playing ? "pause-sign" : "play-sign";
-  if (playing) playbackFrame = requestAnimationFrame(tick);
+  if (playing) {
+    if (liveMode) paint(elapsed, true);
+    playbackFrame = requestAnimationFrame(tick);
+  }
 }
 
 $("playback").addEventListener("click", () => {
   if (playing) return setPlaying(false);
-  if (elapsed >= duration) paint(0);
+  if (liveMode && (elapsed === 0 || elapsed >= duration)) prepareSequence();
+  else if (elapsed >= duration) paint(0);
   setPlaying(true);
 });
 $("restart").addEventListener("click", () => {
@@ -344,7 +365,8 @@ function openIndex({ routes = null, title = "全部任务", reset = true } = {})
   $("dialog-title").textContent = title;
   $("task-index").hidden = false;
   $("task-detail").hidden = true;
-  $("import-bar").hidden = Boolean(routes);
+  detailView = null;
+  $("import-bar").hidden = liveMode || Boolean(routes);
   showDialog();
   renderIndex();
 }
@@ -352,6 +374,7 @@ function openIndex({ routes = null, title = "全部任务", reset = true } = {})
 function taskRow(task) {
   const row = element("li");
   const open = button("index-row", () => openDetail(task, true));
+  open.dataset.taskKey = task.key;
   open.append(
     element("span", "mono", `${task.source === "linear" ? "Linear" : "GitHub"} · ${task.id}`),
     element("small", null, task.status),
@@ -361,7 +384,7 @@ function taskRow(task) {
   return row;
 }
 
-function renderIndex() {
+function renderIndex(preservePosition = false) {
   const query = $("find-task").value.toLowerCase().trim();
   const results = tasks.filter((task) =>
     (!panelRoutes || panelRoutes.includes(task.route)) &&
@@ -373,22 +396,43 @@ function renderIndex() {
   });
   $("index-caption").textContent = `${results.length} 条任务`;
   const list = $("index-results");
+  const scrollTop = list.scrollTop;
+  const focusKey = list.contains(document.activeElement) ? document.activeElement.dataset.taskKey : null;
   list.replaceChildren(...results.map(taskRow));
   if (results.length === 0) list.append(element("li", "empty", "没有符合条件的任务"));
-  list.scrollTop = 0;
+  list.scrollTop = preservePosition ? scrollTop : 0;
+  if (preservePosition && focusKey) {
+    const matching = [...list.querySelectorAll("button")].find((control) => control.dataset.taskKey === focusKey);
+    (matching || $("find-task")).focus({ preventScroll: true });
+  }
 }
 
 function openDetail(task, fromIndex = false) {
-  const previousHeading = fromIndex && !$("task-index").hidden ? $("dialog-title").textContent : "全部任务";
-  const previousRoutes = fromIndex && !$("task-index").hidden ? panelRoutes : null;
+  const previous = fromIndex && !$("task-index").hidden
+    ? { routes: panelRoutes, title: $("dialog-title").textContent, reset: false }
+    : fromIndex && dialog.open ? detailView?.previous || {} : {};
+  detailView = { task, previous };
+  renderDetail();
+  showDialog();
+  $("task-detail").querySelector("button").focus();
+}
+
+function renderDetail(preservePosition = false) {
+  const current = tasks.find((entry) => entry.key === detailView.task.key);
+  const task = current || detailView.task;
+  detailView.task = task;
   $("dialog-kicker").textContent = task.source === "linear" ? "LINEAR ISSUE" : "GITHUB PULL REQUEST";
   $("dialog-title").textContent = task.id;
   $("task-index").hidden = true;
   const detail = $("task-detail");
   detail.hidden = false;
-  const back = button("button", () => openIndex({ routes: previousRoutes, title: previousHeading, reset: !fromIndex }));
+  const scrollTop = detail.scrollTop;
+  const focus = detail.contains(document.activeElement) ? document.activeElement.dataset : null;
+  const back = button("button", () => openIndex(detailView.previous));
+  back.dataset.action = "back";
   back.textContent = "← 返回任务列表";
   detail.replaceChildren(back, element("h3", "detail-title", task.title));
+  if (liveMode && !current) detail.append(element("p", "empty", "这条任务已离开当前同步范围。"));
   const meta = element("dl", "detail-meta");
   const fields = [
     ["当前状态", task.status],
@@ -406,11 +450,13 @@ function openDetail(task, fromIndex = false) {
     prepareSequence(task);
     setPlaying(true);
   });
+  replay.dataset.action = "replay";
   replay.textContent = "从这条开始演示";
   actions.append(replay);
   if (task.url) {
     const link = element("a", "button original", `打开 ${task.source === "linear" ? "Linear" : "GitHub"} 原始任务 ↗`);
     link.href = task.url;
+    link.dataset.action = "source";
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     actions.append(link);
@@ -426,9 +472,120 @@ function openDetail(task, fromIndex = false) {
     list.append(...related.map(taskRow));
     detail.append(list);
   }
-  detail.scrollTop = 0;
-  showDialog();
-  back.focus();
+  detail.scrollTop = preservePosition ? scrollTop : 0;
+  if (preservePosition && focus) {
+    const matching = [...detail.querySelectorAll("[data-action], [data-task-key]")].find((control) =>
+      focus.action ? control.dataset.action === focus.action : control.dataset.taskKey === focus.taskKey
+    );
+    (matching || back).focus({ preventScroll: true });
+  }
+}
+
+function renderLiveHealth(connection) {
+  const sources = lastSnapshot?.sources || {};
+  for (const [key, name] of [["linear", "Linear"], ["github", "GitHub"]]) {
+    const source = sources[key];
+    const badge = $(`source-${key}`);
+    const state = source?.state || "loading";
+    badge.dataset.state = connection === "connected" ? state : "loading";
+    const lastStatus = state === "ok" ? "已同步" : state === "error" ? "同步中断" : "待读取";
+    badge.textContent = `${name} · ${lastStatus}`;
+    const checked = dateString(source?.checkedAt);
+    badge.title = [source?.reason, checked && `最近同步 ${checked}（北京时间）`].filter(Boolean).join("\n");
+  }
+
+  const bothReady = sources.linear?.state === "ok" && sources.github?.state === "ok";
+  const hasError = sources.linear?.state === "error" || sources.github?.state === "error";
+  const label = $("snapshot-label");
+  label.parentElement.dataset.state = connection === "connected" ? (bothReady ? "ok" : hasError ? "error" : "loading") : "loading";
+  const recentCheck = Math.max(
+    Date.parse(sources.linear?.checkedAt) || 0,
+    Date.parse(sources.github?.checkedAt) || 0,
+    Date.parse(lastSnapshot?.snapshotAt) || 0
+  );
+  const time = recentCheck ? ` · ${syncTimeFormatter.format(recentCheck)}` : "";
+  const message = connection === "connecting" ? "连接本地服务" : connection === "reconnecting" ? "本地服务重连中" :
+    bothReady ? "本地实时" : hasError ? "同步受限" : "正在读取任务";
+  label.textContent = message + time;
+  const interval = lastSnapshot?.intervalSeconds;
+  label.title = Number.isFinite(interval) && interval > 0 ? `每 ${interval} 秒检查一次任务状态，时间为北京时间。` : "";
+}
+
+function liveEventRow({ task, previous, status, at }) {
+  const row = element("li");
+  const open = button("event-entry", () => openDetail(task));
+  open.title = task.title;
+  open.append(
+    element("span", "mono", syncTimeFormatter.format(at)),
+    element("strong", null, `${task.id} · ${displayTitle(task.title)}`),
+    element("small", null, `${previous} → ${status}`)
+  );
+  row.append(open);
+  return row;
+}
+
+function updateLiveTasks(records, snapshot) {
+  const revision = JSON.stringify(records);
+  if (revision === liveRevision) return;
+  liveRevision = revision;
+  const oldTasks = new Map(tasks.map((task) => [task.key, task]));
+  const changes = records.flatMap((task) => {
+    const old = oldTasks.get(task.key);
+    if (!old || (old.status === task.status && old.route === task.route)) return [];
+    const at = Date.parse(snapshot.sources?.[task.source]?.checkedAt) || Date.parse(snapshot.snapshotAt) || Date.now();
+    const sameStatus = old.status === task.status;
+    const previous = sameStatus ? ROUTES[old.route].title : old.status;
+    const status = sameStatus ? ROUTES[task.route].title : task.status;
+    return [{ task, previous, status, at }];
+  });
+  tasks = records;
+  renderTaskCounts();
+  const queue = tasks.filter((task) => task.route !== 3);
+  $("queue-count").textContent = queue.length;
+  $("queue").replaceChildren(...queue.map((task) => queueRow(task, false)));
+  if (queue.length === 0) $("queue").append(element("li", "empty", "暂无进行中或待处理的任务"));
+  if (changes.length) {
+    liveChanges = [...changes, ...liveChanges].slice(0, 30);
+    $("events").replaceChildren(...liveChanges.map(liveEventRow));
+    $("empty-events").hidden = true;
+    if (!playing && (elapsed === 0 || elapsed >= duration)) {
+      paint(elapsed, true);
+      if (!reducedMotion.matches) {
+        for (const route of new Set(changes.map(({ task }) => task.route))) {
+          controls[route].control.animate([{ borderColor: "#a3ceb0" }, { borderColor: "#575757" }], 1800);
+        }
+      }
+    }
+  }
+  if (!duration) prepareSequence();
+  if (dialog.open && detailView) renderDetail(true);
+  else if (dialog.open) renderIndex(true);
+  measureNetwork();
+}
+
+function startLive() {
+  $("live-sources").hidden = false;
+  $("activity-kind").textContent = "本次打开";
+  $("empty-events").textContent = "状态变化会自动出现在这里";
+  $("import-bar").hidden = true;
+  $("queue").append(element("li", "empty", "正在读取任务"));
+  renderTaskCounts();
+  prepareSequence();
+  renderLiveHealth("connecting");
+  const stream = new EventSource("/api/events");
+  stream.addEventListener("open", () => renderLiveHealth("connected"));
+  stream.addEventListener("error", () => renderLiveHealth("reconnecting"));
+  stream.addEventListener("snapshot", (event) => {
+    try {
+      const snapshot = JSON.parse(event.data);
+      const records = normalize(snapshot);
+      lastSnapshot = snapshot;
+      renderLiveHealth("connected");
+      updateLiveTasks(records, snapshot);
+    } catch {
+      renderLiveHealth("reconnecting");
+    }
+  });
 }
 
 $("open-tasks").addEventListener("click", () => openIndex());
@@ -436,7 +593,7 @@ $("close-dialog").addEventListener("click", () => dialog.close());
 dialog.addEventListener("click", (event) => {
   if (event.target === dialog && event.clientX < dialog.getBoundingClientRect().left) dialog.close();
 });
-$("find-task").addEventListener("input", renderIndex);
+$("find-task").addEventListener("input", () => renderIndex());
 document.querySelectorAll(".tabs button").forEach((control) => {
   control.addEventListener("click", () => {
     panelSource = control.dataset.source;
@@ -459,11 +616,14 @@ $("import-snapshot").addEventListener("change", async (event) => {
   }
 });
 
-try {
-  setSnapshot(window.DISPATCH_SNAPSHOT || EXAMPLE, !window.DISPATCH_SNAPSHOT);
-} catch {
-  setSnapshot(EXAMPLE, true);
-  $("snapshot-label").textContent = "快照无效 · 示例任务";
+if (liveMode) startLive();
+else {
+  try {
+    setSnapshot(window.DISPATCH_SNAPSHOT || EXAMPLE, !window.DISPATCH_SNAPSHOT);
+  } catch {
+    setSnapshot(EXAMPLE, true);
+    $("snapshot-label").textContent = "快照无效 · 示例任务";
+  }
 }
 measureNetwork();
 const observer = new ResizeObserver(measureNetwork);
@@ -472,4 +632,4 @@ new window.DispatchNetwork($("network"), networkLayout, trackPacket);
 reducedMotion.addEventListener("change", (event) => {
   if (event.matches) setPlaying(false);
 });
-if (!reducedMotion.matches) setPlaying(true);
+if (!liveMode && !reducedMotion.matches) setPlaying(true);

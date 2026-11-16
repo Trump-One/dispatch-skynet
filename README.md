@@ -1,16 +1,28 @@
 # 任务调度中心
 
-基于参考视频制作的 Linear / GitHub 任务调度演示。页面用旋转线框球、状态节点和光点展示任务如何按快照里的状态归类。点击任务可以查看原状态、关联项和原始链接。
+本机运行的 Linear / GitHub 任务看板。页面按任务状态更新节点和计数，右侧显示打开页面后观察到的状态变化。点击任务可以查看详情、关联项和原始链接，左下角可以播放参考视频风格的分流演示。
 
-## 打开
+## 本机运行
 
-直接用浏览器打开 `index.html`。页面不需要安装依赖或启动服务。首次打开会使用示例任务。
+需要 Node.js 22 或更新版本及已登录的 GitHub CLI。复制 `.env.example` 为 `.env.local`，填入要跟踪的仓库与 Linear 配置，然后启动本地服务。
 
-## 换成真实任务
+```sh
+node --env-file-if-exists=.env.local server.mjs
+```
 
-在「全部任务」中使用「载入任务快照」，选择本地 JSON。关闭或刷新页面会清除导入的数据。如需每次自动载入快照，可把 `index.html` 复制为 `preview.html`，在 `app.js` 的脚本标签前加上 `<script src="tasks.local.js"></script>`，并将 `window.DISPATCH_SNAPSHOT = <JSON>;` 写入 `tasks.local.js`。预览文件和本地快照均被 Git 忽略。
+打开 [本机看板](http://127.0.0.1:4321)。默认约每 20 秒检查一次最近更新的 50 条指派给你的 Linear issue 和 50 条你提交的仓库 PR。当两边都读成功时，页面右上角显示「本地实时」。某一来源暂时失败时，另一来源继续更新，失败的来源保留上次成功的数据。读取恢复后，打开的页面会接着更新。终端按 Ctrl+C 可停止服务。
 
-JSON 支持以下结构，其中日期使用 ISO 8601 格式，`issueId` 用于关联 Linear issue 和 PR。
+### Linear 连接
+
+可复用 Codex 中已登录的 Linear 连接。填写 `LINEAR_LINK_ID`、`LINEAR_ASSIGNEE` 和 `LINEAR_WORKSPACE`。服务使用本机 Codex CLI 的实验性 App Server 工具接口读取指定负责人的 issue。如需指定 Codex 或 GitHub CLI 的路径，分别填写 `DISPATCH_CODEX_PATH` 或 `DISPATCH_GH_PATH`。
+
+也可在 `.env.local` 中填入 Linear 的只读个人 API 密钥 `LINEAR_API_KEY`，由服务直接访问 Linear。省略 `LINEAR_ASSIGNEE` 时，使用密钥所属用户。参见 [Linear API 密钥文档](https://linear.app/docs/api-and-webhooks)。
+
+服务只监听 `127.0.0.1`，只读 Linear 与 GitHub。本机配置和缓存位于 Git 忽略的 `.env.local` 和 `.dispatch/`。
+
+## 离线演示
+
+直接在浏览器打开 `index.html` 可查看示例数据。也可以在「全部任务」里载入本地 JSON 快照。JSON 使用以下结构，`issueId` 可将 Linear issue 和 GitHub PR 关联起来。
 
 ```json
 {
@@ -23,5 +35,3 @@ JSON 支持以下结构，其中日期使用 ISO 8601 格式，`issueId` 用于�
   ]
 }
 ```
-
-每条记录可附 `url` 和 `updatedAt`。Linear 记录还可附 `project`、`completedAt`。GitHub 记录可附 `reviewDecision`、`mergedAt`、`createdAt`。页面按快照演示分流，浏览器无需连接 Linear 或 GitHub。
